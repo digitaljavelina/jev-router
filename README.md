@@ -355,7 +355,7 @@ Same deal as the installer: it shows you what it will remove and waits for a `y`
 
 ## Credits
 
-The idea came from [Jev will 10x your Claude Code](https://youtu.be/tTnUcSj-QPA) by Jay E at RoboNuggets. I had not heard of Jev before that video, and this repo is what came out of watching it.
+This router was inspired by [Jev will 10x your Claude Code](https://youtu.be/tTnUcSj-QPA) by Jay E at RoboNuggets. Jev was already on my radar. That video is what turned it into something I actually built.
 
 Classification by [Jev](https://typesafe.ai), TypeSafe's System One model. Built with [Claude Code](https://claude.com/claude-code).
 
