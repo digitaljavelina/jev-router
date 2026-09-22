@@ -114,7 +114,9 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### Step 3: get a TypeSafe API key
 
-Sign up at [typesafe.ai](https://typesafe.ai) and create a key. Then save it where the router looks for it:
+Sign up at [typesafe.ai](https://typesafe.ai) and create a key. New signups come with $5 in credit, which at this router's measured usage is roughly 165,000 messages. You are unlikely to spend it.
+
+Save the key where the router looks for it:
 
 ```bash
 mkdir -p ~/.config/typesafe
