@@ -1,0 +1,16 @@
+# Never commit these.
+# config.json holds your personal preset.
+# state.json holds the first 90 characters of every message you have sent.
+config.json
+state.json
+state.json.tmp
+key
+*.key
+.env
+.env.*
+
+# Local scratch
+_test_transcript.jsonl
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""jev: on/off switch, status, and test harness for the Jev message router."""
+import json
+import os
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+BASE = os.path.join(CLAUDE_DIR, "jev-router")
+CONFIG_PATH = os.path.join(BASE, "config.json")
+STATE_PATH = os.path.join(BASE, "state.json")
+ROUTE = os.path.join(BASE, "route.py")
+PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000
+
+PRESETS = {
+    # Main session stays strong. Route grunt work DOWN. Safest dispatcher.
+    "strong-base": {
+        "_note": "Main session on opus/fable. Dispatcher is smart. Saves on grunt work only.",
+        "tiny":     {"mode": "inline",   "model": None},
+        "bulk":     {"mode": "subagent", "model": "haiku"},
+        "standard": {"mode": "subagent", "model": "sonnet"},
+        "hard":     {"mode": "inline",   "model": None},
+    },
+    # Main session middling. Route down AND up. Best cost/quality balance.
+    "sonnet-base": {
+        "_note": "Main session on sonnet. Route down to haiku, up to opus. Recommended.",
+        "tiny":     {"mode": "inline",   "model": None},
+        "bulk":     {"mode": "subagent", "model": "haiku"},
+        "standard": {"mode": "inline",   "model": None},
+        "hard":     {"mode": "subagent", "model": "opus"},
+    },
+    # Main session cheapest. Escalate everything up. Cheapest, weakest dispatcher.
+    "cheap-base": {
+        "_note": "Main session on haiku. Cheapest. Dispatcher may write weak sub-agent briefs.",
+        "tiny":     {"mode": "inline",   "model": None},
+        "bulk":     {"mode": "inline",   "model": None},
+        "standard": {"mode": "subagent", "model": "sonnet"},
+        "hard":     {"mode": "subagent", "model": "opus"},
+    },
+}
+
+SESSION_MODEL_FOR_PRESET = {
+    "strong-base": "opus (or your current fable)",
+    "sonnet-base": "sonnet",
+    "cheap-base": "haiku",
+}
+
+TESTS = [
+    ("1  tiny",      "thanks!"),
+    ("2  tiny",      "what year did the first iPhone ship?"),
+    ("3  bulk",      "go through every note in Posts/Social and list the ones with no image in the frontmatter"),
+    ("4  bulk",      "rename every .jpeg file under Attachments to .jpg and fix any wikilinks that point at them"),
+    ("5  standard",  "write me a python script that reads a csv of lab values and plots each one over time"),
+    ("6  standard",  "the publish script is throwing a KeyError on 'image' when the note has no image, add a guard"),
+    ("7  hard",      "my n8n workflow drops about 1 in 40 webhooks and I cannot work out why, the logs show nothing"),
+    ("8  hard",      "design the architecture for a multi-tenant RSS service where each tenant gets isolated storage, rate limits and their own retention policy, and tell me the tradeoffs"),
+    ("9  followup",  "yes do that but make it shorter"),
+    ("10 followup",  "no, the other one"),
+]
+
+CONTEXT_FOR_FOLLOWUP = (
+    "Here is the architecture. I would run one Postgres schema per tenant behind a shared "
+    "connection pool, with retention enforced by a per-tenant cron partition drop. The "
+    "alternative is a single shared table with a tenant_id column and row-level security, "
+    "which is cheaper to run but harder to give real isolation guarantees."
+)
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    os.makedirs(BASE, exist_ok=True)
+    with open(CONFIG_PATH, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+
+
+def load_state():
+    try:
+        with open(STATE_PATH) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def have_key():
+    if os.environ.get("TYPESAFE_API_KEY"):
+        return True
+    for p in (os.path.join(HOME, ".config", "typesafe", "key"),
+              os.path.join(HOME, ".config", "typesafe", ".env"),
+              os.path.join(BASE, "key")):
+        if os.path.exists(p) and open(p).read().strip():
+            return True
+    return False
+
+
+def cmd_on():
+    cfg = load_config()
+    cfg["enabled"] = True
+    save_config(cfg)
+    preset = cfg.get("preset", "strong-base")
+    print("Jev router is ON.")
+    print("  preset: %s" % preset)
+    print("  recommended session model: %s" % SESSION_MODEL_FOR_PRESET.get(preset, "?"))
+    if not have_key():
+        print("  WARNING: no TypeSafe API key found. Every message will fail open (no routing).")
+    print("\n  Your messages are sent to the TypeSafe API for classification.")
+    print("  Turn it off before anything private:  jev off")
+
+
+def cmd_off():
+    cfg = load_config()
+    cfg["enabled"] = False
+    save_config(cfg)
+    print("Jev router is OFF. Nothing leaves this machine.")
+
+
+def cmd_preset(name):
+    if name not in PRESETS:
+        print("Unknown preset %r. Options: %s" % (name, ", ".join(PRESETS)))
+        return 1
+    cfg = load_config()
+    routes = {k: v for k, v in PRESETS[name].items() if not k.startswith("_")}
+    cfg["preset"] = name
+    cfg["routes"] = routes
+    save_config(cfg)
+    print("Preset set to %s." % name)
+    print("  %s" % PRESETS[name]["_note"])
+    print("  Set your session model to: %s   (use /model)" % SESSION_MODEL_FOR_PRESET[name])
+    for bucket, r in routes.items():
+        dest = ("%s sub-agent" % r["model"]) if r["mode"] == "subagent" else "answered inline"
+        print("    %-9s -> %s" % (bucket, dest))
+    return 0
+
+
+def cmd_status():
+    cfg = load_config()
+    st = load_state()
+    counts = st.get("counts", {})
+    tokens = st.get("input_tokens", 0)
+    reqs = st.get("requests", 0)
+    lat = st.get("latency_ms", 0)
+    preset = cfg.get("preset", "strong-base")
+    routes = cfg.get("routes") or {k: v for k, v in PRESETS[preset].items() if not k.startswith("_")}
+
+    print("Jev router: %s" % ("ON" if cfg.get("enabled") else "OFF"))
+    print("  preset            %s" % preset)
+    print("  session model     %s (recommended)" % SESSION_MODEL_FOR_PRESET.get(preset, "?"))
+    print("  api key           %s" % ("found" if have_key() else "MISSING"))
+    print("  jev model         %s" % cfg.get("model", "jev-latest"))
+    print("  timeout           %d ms" % cfg.get("timeout_ms", 3000))
+    print("  min confidence    %.2f" % cfg.get("min_confidence", 0.55))
+    print()
+    print("  %-10s %7s   %s" % ("bucket", "count", "handled by"))
+    print("  " + "-" * 44)
+    total = 0
+    for bucket in ("tiny", "bulk", "standard", "hard"):
+        n = counts.get(bucket, 0)
+        total += n
+        r = routes.get(bucket, {})
+        dest = ("%s sub-agent" % r.get("model")) if r.get("mode") == "subagent" else "inline"
+        print("  %-10s %7d   %s" % (bucket, n, dest))
+    print("  " + "-" * 44)
+    print("  %-10s %7d" % ("routed", total))
+    print("  %-10s %7d   (kept inline, jev unsure)" % ("low conf", counts.get("lowconf", 0)))
+    print("  %-10s %7d   (failed open, message untouched)" % ("failed", counts.get("failed", 0)))
+    print()
+    print("  Jev cost so far   $%.6f  (%s input tokens over %d requests)"
+          % (tokens * PRICE_PER_INPUT_TOKEN, "{:,}".format(tokens), reqs))
+    if reqs:
+        print("  avg added delay   %d ms per message" % (lat / reqs))
+        print("  cost per 1,000    $%.4f" % (tokens / reqs * 1000 * PRICE_PER_INPUT_TOKEN))
+    last = st.get("log", [])[-5:]
+    if last:
+        print("\n  last %d:" % len(last))
+        for e in last:
+            if "error" in e:
+                print("    FAILED OPEN  %s" % e["error"][:70])
+            else:
+                print("    %-9s %.2f -> %-7s %4dms  %s"
+                      % (e.get("bucket"), e.get("conf", 0), e.get("routed"),
+                         e.get("ms", 0), (e.get("msg") or "")[:46]))
+
+
+def cmd_reset():
+    try:
+        os.remove(STATE_PATH)
+    except FileNotFoundError:
+        pass
+    print("Counters and cost reset to zero.")
+
+
+def cmd_test():
+    """Run the sample messages through the real Jev API and print a table."""
+    if not have_key():
+        print("Cannot test: no TypeSafe API key found.")
+        print("Put it in ~/.config/typesafe/key or export TYPESAFE_API_KEY.")
+        return 1
+    cfg = load_config()
+    preset = cfg.get("preset", "strong-base")
+    routes = cfg.get("routes") or {k: v for k, v in PRESETS[preset].items() if not k.startswith("_")}
+
+    # Force-enable for the duration of the test without touching the saved switch.
+    env = dict(os.environ, JEV_FORCE="1")
+    rows = []
+    for label, msg in TESTS:
+        transcript = None
+        if "followup" in label:
+            transcript = os.path.join(BASE, "_test_transcript.jsonl")
+            with open(transcript, "w") as fh:
+                fh.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": CONTEXT_FOR_FOLLOWUP}]},
+                }) + "\n")
+        payload = {"prompt": msg, "hook_event_name": "UserPromptSubmit"}
+        if transcript:
+            payload["transcript_path"] = transcript
+        t0 = time.time()
+        proc = subprocess.run([sys.executable, ROUTE], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+        ms = int((time.time() - t0) * 1000)
+        bucket, conf, dest, dist = "FAILED", 0.0, "inline (open)", ""
+        if proc.stdout.strip():
+            try:
+                ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+                head = ctx.splitlines()[0]
+                bucket = head.split("bucket=")[1].split()[0]
+                conf = float(head.split("confidence=")[1].split()[0])
+                dist = head.split("(", 1)[1].split(")")[0]
+                r = routes.get(bucket, {})
+                dest = ("%s sub-agent" % r.get("model")) if r.get("mode") == "subagent" else "inline"
+            except Exception:
+                pass
+        rows.append((label, msg, bucket, conf, dest, ms, dist))
+
+    print("\nJev routing test   preset=%s\n" % preset)
+    print("| # | message | jev picked | confidence | handled by | ms |")
+    print("|---|---------|-----------|-----------|-----------|-----|")
+    for label, msg, bucket, conf, dest, ms, dist in rows:
+        short = msg if len(msg) <= 52 else msg[:49] + "..."
+        print("| %s | %s | **%s** | %.2f | %s | %d |"
+              % (label, short, bucket, conf, dest, ms))
+    print("\nfull distributions:")
+    for label, _m, bucket, _c, _d, _ms, dist in rows:
+        print("  %-12s %s" % (label, dist or "(failed open)"))
+    try:
+        os.remove(os.path.join(BASE, "_test_transcript.jsonl"))
+    except Exception:
+        pass
+    return 0
+
+
+USAGE = """jev - message router using TypeSafe's Jev model
+
+  jev on                 turn the router on
+  jev off                turn the router off
+  jev status             counts per bucket, jev cost, added delay
+  jev preset <name>      strong-base | sonnet-base | cheap-base
+  jev test               run the sample messages through real Jev, print table
+  jev reset              zero the counters and cost
+"""
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    cmd = args[0] if args else "status"
+    if cmd == "on":
+        cmd_on()
+    elif cmd == "off":
+        cmd_off()
+    elif cmd == "status":
+        cmd_status()
+    elif cmd == "preset":
+        sys.exit(cmd_preset(args[1]) if len(args) > 1 else (print(USAGE) or 1))
+    elif cmd == "test":
+        sys.exit(cmd_test())
+    elif cmd == "reset":
+        cmd_reset()
+    else:
+        print(USAGE)

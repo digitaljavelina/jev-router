@@ -1,0 +1,16 @@
+{
+  "enabled": false,
+  "preset": "strong-base",
+  "model": "jev-latest",
+  "timeout_ms": 1500,
+  "min_confidence": 0.55,
+  "max_message_chars": 6000,
+  "context_chars": 1200,
+  "log_keep": 200,
+  "routes": {
+    "tiny":     { "mode": "inline",   "model": null },
+    "bulk":     { "mode": "subagent", "model": "haiku" },
+    "standard": { "mode": "subagent", "model": "sonnet" },
+    "hard":     { "mode": "inline",   "model": null }
+  }
+}
