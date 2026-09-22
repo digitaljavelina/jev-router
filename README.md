@@ -14,6 +14,8 @@ you: my n8n workflow drops 1 in 40 webhooks and I cannot work out why
 
 It costs about **three cents per thousand messages** and adds about **250 milliseconds** per message. It is off by default, and if anything goes wrong it gets out of the way and your message goes through untouched.
 
+Inspired by [Jev will 10x your Claude Code](https://youtu.be/tTnUcSj-QPA) by Jay E at RoboNuggets.
+
 ---
 
 ## Table of contents
@@ -353,7 +355,9 @@ Same deal as the installer: it shows you what it will remove and waits for a `y`
 
 ## Credits
 
-Built with [Claude Code](https://claude.com/claude-code). Classification by [Jev](https://typesafe.ai), TypeSafe's System One model.
+The idea came from [Jev will 10x your Claude Code](https://youtu.be/tTnUcSj-QPA) by Jay E at RoboNuggets. I had not heard of Jev before that video, and this repo is what came out of watching it.
+
+Classification by [Jev](https://typesafe.ai), TypeSafe's System One model. Built with [Claude Code](https://claude.com/claude-code).
 
 By [Michael Henry](https://digitaljavelina.com).
 
